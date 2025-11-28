@@ -25,6 +25,7 @@
 #include "iceberg/parquet/parquet_register.h"
 #include "iceberg/table.h"
 #include "iceberg/table_scan.h"
+#include "iceberg/update_properties.h"
 
 int main(int argc, char** argv) {
   if (argc != 4) {
@@ -58,6 +59,15 @@ int main(int argc, char** argv) {
   }
 
   auto table = std::move(load_result.value());
+  // auto update_result = table->UpdateProperties()->Set("k1",
+  // "v1").Remove("k2").Commit(); if (!update_result.has_value()) {
+  //   std::cerr << "Failed to update table's properties: " <<
+  //   update_result.error().message
+  //             << std::endl;
+  //   return 1;
+  // }
+  // table = std::move(update_result.value());
+
   auto scan_result = table->NewScan()->Build();
   if (!scan_result.has_value()) {
     std::cerr << "Failed to build scan: " << scan_result.error().message << std::endl;

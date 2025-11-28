@@ -101,6 +101,9 @@ class ICEBERG_EXPORT InMemoryCatalog
                                            const Schema& schema) const override;
 
  private:
+  class InMemoryTableOperations;
+  friend class InMemoryTableOperations;
+
   std::string catalog_name_;
   std::unordered_map<std::string, std::string> properties_;
   std::shared_ptr<FileIO> file_io_;

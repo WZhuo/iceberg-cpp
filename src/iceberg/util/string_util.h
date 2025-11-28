@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <ranges>
+#include <sstream>
 #include <string>
 
 #include "iceberg/iceberg_export.h"
@@ -48,6 +49,16 @@ class ICEBERG_EXPORT StringUtils {
   static bool EqualsIgnoreCase(std::string_view lhs, std::string_view rhs) {
     return std::ranges::equal(
         lhs, rhs, [](char lc, char rc) { return std::tolower(lc) == std::tolower(rc); });
+  }
+
+  template <typename Container, typename Delimiter>
+  static std::string Join(Container&& c, Delimiter&& d) {
+    std::ostringstream oss;
+    for (auto it = c.begin(); it != c.end(); ++it) {
+      if (it != c.begin()) oss << d;
+      oss << *it;
+    }
+    return oss.str();
   }
 };
 

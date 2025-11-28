@@ -22,6 +22,7 @@
 /// \file iceberg/table_metadata.h
 /// Table metadata for Iceberg tables.
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -56,6 +57,12 @@ struct ICEBERG_EXPORT MetadataLogEntry {
   friend bool operator==(const MetadataLogEntry& lhs, const MetadataLogEntry& rhs) {
     return lhs.timestamp_ms == rhs.timestamp_ms && lhs.metadata_file == rhs.metadata_file;
   }
+
+  struct Hasher {
+    size_t operator()(const MetadataLogEntry& m) const noexcept {
+      return std::hash<std::string>{}(m.metadata_file);
+    }
+  };
 };
 
 /// \brief Represents the metadata for an Iceberg table
