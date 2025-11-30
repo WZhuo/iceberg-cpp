@@ -20,11 +20,17 @@
 #include "iceberg/catalog/memory/in_memory_catalog.h"
 
 #include <algorithm>
+#include <format>
 #include <iterator>  // IWYU pragma: keep
+#include <memory>
 
+#include "iceberg/base_metastore_table_operations.h"
 #include "iceberg/exception.h"
 #include "iceberg/table.h"
+#include "iceberg/table_identifier.h"
 #include "iceberg/table_metadata.h"
+#include "iceberg/table_requirement.h"
+#include "iceberg/table_update.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg {
@@ -97,10 +103,11 @@ class ICEBERG_EXPORT InMemoryNamespace {
   ///
   /// \param table_ident The fully qualified identifier of the table.
   /// \param metadata_location The path to the table's metadata.
+  /// \param force If true, forcefully registers the table even if it already exists.
   /// \return Status::OK if the table is registered;
   ///         Error otherwise.
   Status RegisterTable(const TableIdentifier& table_ident,
-                       const std::string& metadata_location);
+                       const std::string& metadata_location, bool force = false);
 
   /// \brief Unregisters a table from the specified namespace.
   ///
@@ -280,10 +287,11 @@ Result<std::vector<std::string>> InMemoryNamespace::ListTables(
 }
 
 Status InMemoryNamespace::RegisterTable(TableIdentifier const& table_ident,
-                                        const std::string& metadata_location) {
+                                        const std::string& metadata_location,
+                                        bool force) {
   const auto ns = GetNamespace(this, table_ident.ns);
   ICEBERG_RETURN_UNEXPECTED(ns);
-  if (ns.value()->table_metadata_locations_.contains(table_ident.name)) {
+  if (!force && ns.value()->table_metadata_locations_.contains(table_ident.name)) {
     return AlreadyExists("{} already exists", table_ident.name);
   }
   ns.value()->table_metadata_locations_[table_ident.name] = metadata_location;
@@ -312,6 +320,110 @@ Result<std::string> InMemoryNamespace::GetTableMetadataLocation(
     return NotFound("{} does not exist", table_ident.name);
   }
   return it->second;
+}
+
+class InMemoryCatalog::InMemoryTableOperations : public BaseMetastoreTableOperations {
+ public:
+  InMemoryTableOperations(std::shared_ptr<FileIO> file_io,
+                          const TableIdentifier& table_identifier,
+                          const std::string& catalog_name, InMemoryCatalog* catalog);
+
+  ~InMemoryTableOperations() override = default;
+
+ protected:
+  /// \brief Perform actual refresh operation
+  Status DoRefresh() override;
+
+  /// \brief Perform actual commit operation
+  Status DoCommit(const TableMetadata* base, const TableMetadata* metadata) override;
+
+  /// \brief Returns the FileIO instance
+  std::shared_ptr<FileIO> io() override;
+
+  /// \brief Get table name for logging purposes
+  std::string table_name() const override;
+
+ private:
+  std::shared_ptr<FileIO> file_io_;
+  TableIdentifier table_identifier_;
+  std::string full_table_name_;
+
+  // Non-owning pointer to parent catalog
+  InMemoryCatalog* catalog_;
+
+  /// \brief Helper to construct full table name
+  static std::string full_table_name(const std::string& catalog_name,
+                                     const TableIdentifier& table_identifier);
+};
+
+InMemoryCatalog::InMemoryTableOperations::InMemoryTableOperations(
+    std::shared_ptr<FileIO> file_io, const TableIdentifier& table_identifier,
+    const std::string& catalog_name, InMemoryCatalog* catalog)
+    : file_io_(std::move(file_io)),
+      table_identifier_(table_identifier),
+      full_table_name_(full_table_name(catalog_name, table_identifier)),
+      catalog_(catalog) {}
+
+Status InMemoryCatalog::InMemoryTableOperations::DoRefresh() {
+  const auto location_result =
+      catalog_->root_namespace_->GetTableMetadataLocation(table_identifier_);
+  if (!location_result.has_value()) {
+    DisableRefresh();
+    return {};
+  }
+  return RefreshFromMetadataLocation(location_result.value());
+}
+
+Status InMemoryCatalog::InMemoryTableOperations::DoCommit(const TableMetadata* base,
+                                                          const TableMetadata* metadata) {
+  std::string new_location = WriteNewMetadataIfRequired(base == nullptr, *metadata);
+  std::string old_location = base == nullptr ? "" : base->location;
+
+  // Check if namespace exists when creating a new table
+  if (base == nullptr &&
+      !catalog_->NamespaceExists(table_identifier_.ns).value_or(false)) {
+    return NoSuchNamespace("Cannot create table {}. Namespace does not exist: {}",
+                           table_identifier_.name, table_identifier_.ns.ToString());
+  }
+
+  // TODO(zhuo.wang) Check if a view with the same name exists
+
+  // Check for concurrent modification
+  std::string existing_location =
+      catalog_->root_namespace_->GetTableMetadataLocation(table_identifier_).value_or("");
+
+  if (existing_location != old_location) {
+    if (base == nullptr) {
+      return AlreadyExists("Table already exists: {}", table_name());
+    }
+
+    if (existing_location.empty()) {
+      return NoSuchTable("Table does not exist: {}", table_name());
+    }
+
+    return CommitFailed(
+        "Cannot commit to table {} metadata location from {} to {} "
+        "because it has been concurrently modified to {}",
+        table_identifier_.ToString(), old_location, new_location, existing_location);
+  }
+
+  // Update the table metadata location
+  catalog_->root_namespace_->RegisterTable(table_identifier_, new_location, true);
+  return {};
+}
+
+std::shared_ptr<FileIO> InMemoryCatalog::InMemoryTableOperations::io() {
+  return file_io_;
+}
+
+std::string InMemoryCatalog::InMemoryTableOperations::table_name() const {
+  return full_table_name_;
+}
+
+std::string InMemoryCatalog::InMemoryTableOperations::full_table_name(
+    const std::string& catalog_name, const TableIdentifier& table_identifier) {
+  return std::format("{}.{}.{}", catalog_name, table_identifier.ns.ToString(),
+                     table_identifier.name);
 }
 
 std::shared_ptr<InMemoryCatalog> InMemoryCatalog::Make(
@@ -394,7 +506,28 @@ Result<std::unique_ptr<Table>> InMemoryCatalog::UpdateTable(
     const TableIdentifier& identifier,
     const std::vector<std::unique_ptr<TableRequirement>>& requirements,
     const std::vector<std::unique_ptr<TableUpdate>>& updates) {
-  return NotImplemented("update table");
+  std::unique_lock lock(mutex_);
+  ICEBERG_ASSIGN_OR_RAISE(auto metadata_location,
+                          root_namespace_->GetTableMetadataLocation(identifier));
+
+  ICEBERG_ASSIGN_OR_RAISE(auto base,
+                          TableMetadataUtil::Read(*file_io_, metadata_location));
+
+  for (const auto& requirement : requirements) {
+    ICEBERG_RETURN_UNEXPECTED(requirement->Validate(base.get()));
+  }
+
+  auto builder = TableMetadataBuilder::BuildFrom(base.get());
+  for (const auto& update : updates) {
+    update->ApplyTo(*builder);
+  }
+  ICEBERG_ASSIGN_OR_RAISE(auto updated, builder->Build());
+
+  InMemoryTableOperations ops(file_io_, identifier, catalog_name_, this);
+  ICEBERG_RETURN_UNEXPECTED(ops.Commit(base.get(), updated.get()));
+
+  // build table
+  return {};
 }
 
 Result<std::shared_ptr<Transaction>> InMemoryCatalog::StageCreateTable(

@@ -19,41 +19,27 @@
 
 #pragma once
 
-/// \file iceberg/table_identifier.h
-/// A TableIdentifier is a unique identifier for a table
-
 #include <string>
-#include <vector>
 
 #include "iceberg/iceberg_export.h"
 #include "iceberg/result.h"
-#include "iceberg/util/string_util.h"
 
 namespace iceberg {
 
-static constexpr std::string_view kDOT = ".";
-
-/// \brief A namespace in a catalog.
-struct ICEBERG_EXPORT Namespace {
-  std::vector<std::string> levels;
-
-  std::string ToString() const { return StringUtils::Join(levels, kDOT); }
-};
-
-/// \brief Identifies a table in iceberg catalog.
-struct ICEBERG_EXPORT TableIdentifier {
-  Namespace ns;
-  std::string name;
-
-  /// \brief Validates the TableIdentifier.
-  Status Validate() const {
-    if (name.empty()) {
-      return Invalid("Invalid table identifier: missing table name");
+class ICEBERG_EXPORT LocationUtil {
+ public:
+  static std::string StripTrailingSlash(const std::string& path) {
+    if (path.empty()) {
+      return "";
     }
-    return {};
-  }
 
-  std::string ToString() const { return std::format("{}.{}", ns.ToString(), name); }
+    std::string_view result = path;
+    while (result.length() >= 3 && result.substr(result.length() - 3) != "://" &&
+           result.back() == '/') {
+      result.remove_suffix(1);
+    }
+    return std::string(result);
+  }
 };
 
 }  // namespace iceberg
