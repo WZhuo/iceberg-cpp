@@ -22,6 +22,7 @@
 /// \file iceberg/table_metadata.h
 /// Table metadata for Iceberg tables.
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -57,6 +58,12 @@ struct ICEBERG_EXPORT MetadataLogEntry {
   friend bool operator==(const MetadataLogEntry& lhs, const MetadataLogEntry& rhs) {
     return lhs.timestamp_ms == rhs.timestamp_ms && lhs.metadata_file == rhs.metadata_file;
   }
+
+  struct Hasher {
+    size_t operator()(const MetadataLogEntry& m) const noexcept {
+      return std::hash<std::string>{}(m.metadata_file);
+    }
+  };
 };
 
 /// \brief Represents the metadata for an Iceberg table
@@ -448,11 +455,27 @@ enum class ICEBERG_EXPORT MetadataFileCodecType {
 
 /// \brief Utility class for table metadata
 struct ICEBERG_EXPORT TableMetadataUtil {
+  /// \brief Returns the MetadataFileCodecType corresponding to the given string.
+  ///
+  /// \param name The string to parse.
+  /// \return The MetadataFileCodecType corresponding to the given string.
+  static Result<MetadataFileCodecType> CodecFromString(const std::string_view& name);
+
   /// \brief Get the codec type from the table metadata file name.
   ///
   /// \param file_name The name of the table metadata file.
   /// \return The codec type of the table metadata file.
   static Result<MetadataFileCodecType> CodecFromFileName(std::string_view file_name);
+
+  /// \brief Get the file extension from the codec type.
+  /// \param codec The codec name.
+  /// \return The file extension of the codec.
+  static Result<std::string> CodecNameToFileExtension(const std::string_view& codec);
+
+  /// \brief Get the file extension from the codec type.
+  /// \param codec The codec type.
+  /// \return The file extension of the codec.
+  static std::string CodecTypeToFileExtension(MetadataFileCodecType codec);
 
   /// \brief Read the table metadata file.
   ///

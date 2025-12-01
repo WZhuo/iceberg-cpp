@@ -24,6 +24,7 @@
 #include <format>
 #include <ranges>
 #include <string>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -220,6 +221,17 @@ Result<TableMetadataCache::SnapshotsMap> TableMetadataCache::InitSnapshotMap(
 
 // TableMetadataUtil implementation
 
+Result<MetadataFileCodecType> TableMetadataUtil::CodecFromString(
+    const std::string_view& name) {
+  std::string name_upper = StringUtils::ToUpper(name);
+  if (name_upper == "GZIP") {
+    return MetadataFileCodecType::kGzip;
+  } else if (name_upper == "NONE") {
+    return MetadataFileCodecType::kNone;
+  }
+  return InvalidArgument("Invalid codec type name: {}", name);
+}
+
 Result<MetadataFileCodecType> TableMetadataUtil::CodecFromFileName(
     std::string_view file_name) {
   auto pos = file_name.find_last_of(".metadata.json");
@@ -237,6 +249,22 @@ Result<MetadataFileCodecType> TableMetadataUtil::CodecFromFileName(
     return MetadataFileCodecType::kGzip;
   }
   return MetadataFileCodecType::kNone;
+}
+
+Result<std::string> TableMetadataUtil::CodecNameToFileExtension(
+    const std::string_view& codec) {
+  ICEBERG_ASSIGN_OR_RAISE(MetadataFileCodecType codec_type, CodecFromString(codec));
+  return CodecTypeToFileExtension(codec_type);
+}
+
+std::string TableMetadataUtil::CodecTypeToFileExtension(MetadataFileCodecType codec) {
+  switch (codec) {
+    case MetadataFileCodecType::kGzip:
+      return ".gz.metadata.json";
+    case MetadataFileCodecType::kNone:
+      return ".metadata.json";
+  }
+  std::unreachable();
 }
 
 Result<std::unique_ptr<TableMetadata>> TableMetadataUtil::Read(
