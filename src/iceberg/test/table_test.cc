@@ -41,8 +41,7 @@ TEST(Table, TableV1) {
   ICEBERG_UNWRAP_OR_FAIL(auto metadata,
                          ReadTableMetadataFromResource("TableMetadataV1Valid.json"));
   TableIdentifier tableIdent{.ns = {}, .name = "test_table_v1"};
-  Table table(tableIdent, std::move(metadata), "s3://bucket/test/location/meta/", nullptr,
-              nullptr);
+  Table table(tableIdent, std::move(metadata), nullptr, nullptr);
   ASSERT_EQ(table.name().name, "test_table_v1");
 
   // Check table schema
@@ -81,8 +80,7 @@ TEST(Table, TableV2) {
                          ReadTableMetadataFromResource("TableMetadataV2Valid.json"));
   TableIdentifier tableIdent{.ns = {}, .name = "test_table_v2"};
 
-  Table table(tableIdent, std::move(metadata), "s3://bucket/test/location/meta/", nullptr,
-              nullptr);
+  Table table(tableIdent, std::move(metadata), nullptr, nullptr);
   ASSERT_EQ(table.name().name, "test_table_v2");
 
   // Check table schema
