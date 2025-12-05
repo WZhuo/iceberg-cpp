@@ -120,6 +120,19 @@ class PruneColumnVisitor {
   const bool select_full_types_;
 };
 
+class IdAssigner {
+ public:
+  static std::shared_ptr<iceberg::Schema> AssignFreshIds(
+      int schema_id, const iceberg::Schema& schema, const std::function<int()>& next_id);
+
+ private:
+  static iceberg::SchemaField AssignFieldFreshId(const iceberg::SchemaField& field,
+                                                 const std::function<int()>& next_id);
+
+  static std::shared_ptr<iceberg::Type> AssignTypeFreshId(
+      const std::shared_ptr<iceberg::Type>& type, const std::function<int()>& next_id);
+};
+
 /// \brief Index parent field IDs for all fields in a struct hierarchy.
 /// \param root_struct The root struct type to analyze
 /// \return A map from field ID to its parent struct field ID

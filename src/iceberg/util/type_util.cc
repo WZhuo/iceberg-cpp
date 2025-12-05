@@ -19,13 +19,19 @@
 
 #include "iceberg/util/type_util.h"
 
+#include <memory>
+#include <ranges>
 #include <stack>
 
 #include "iceberg/result.h"
+#include "iceberg/schema.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/formatter_internal.h"
 #include "iceberg/util/string_util.h"
 #include "iceberg/util/visit_type.h"
+
+using std::ranges::to;
+using std::views::transform;
 
 namespace iceberg {
 
@@ -292,6 +298,57 @@ std::unordered_map<int32_t, int32_t> IndexParents(const StructType& root_struct)
 
   visit(root_struct);
   return id_to_parent;
+}
+
+std::shared_ptr<iceberg::Schema> IdAssigner::AssignFreshIds(
+    int schema_id, const iceberg::Schema& schema, const std::function<int()>& next_id) {
+  auto fresh_schema_fields =
+      schema.fields() |
+      transform([&](const auto& field) { return AssignFieldFreshId(field, next_id); }) |
+      to<std::vector<SchemaField>>();
+  return std::make_shared<iceberg::Schema>(std::move(fresh_schema_fields), schema_id);
+}
+
+SchemaField IdAssigner::AssignFieldFreshId(const SchemaField& field,
+                                           const std::function<int()>& next_id) {
+  int field_id = next_id();
+  auto fresh_type = AssignTypeFreshId(field.type(), next_id);
+  return {field_id, std::string(field.name()), fresh_type, field.optional(),
+          std::string(field.doc())};
+}
+
+std::shared_ptr<Type> IdAssigner::AssignTypeFreshId(
+    const std::shared_ptr<Type>& type, const std::function<int()>& id_generator) {
+  switch (type->type_id()) {
+    case TypeId::kStruct: {
+      const auto& struct_type = internal::checked_pointer_cast<StructType>(type);
+      auto fresh_fields = struct_type->fields() | transform([&](const auto& field) {
+                            return AssignFieldFreshId(field, id_generator);
+                          }) |
+                          to<std::vector<SchemaField>>();
+      return std::make_shared<StructType>(std::move(fresh_fields));
+    }
+
+    case TypeId::kList: {
+      const auto& list_type = internal::checked_pointer_cast<ListType>(type);
+      const auto& elem_field = list_type->fields()[0];
+      SchemaField fresh_elem_field = AssignFieldFreshId(elem_field, id_generator);
+      return std::make_shared<ListType>(std::move(fresh_elem_field));
+    }
+
+    case TypeId::kMap: {
+      const auto& map_type = internal::checked_pointer_cast<MapType>(type);
+      const auto& key_field = map_type->fields()[0];
+      const auto& value_field = map_type->fields()[1];
+      SchemaField fresh_key_field = AssignFieldFreshId(key_field, id_generator);
+      SchemaField fresh_value_field = AssignFieldFreshId(value_field, id_generator);
+      return std::make_shared<MapType>(std::move(fresh_key_field),
+                                       std::move(fresh_value_field));
+    }
+
+    default:
+      return type;
+  }
 }
 
 }  // namespace iceberg

@@ -53,6 +53,15 @@ struct ICEBERG_EXPORT TableIdentifier {
     }
     return {};
   }
+
+  std::string ToString() const {
+    std::string result;
+    for (const auto& level : ns.levels) {
+      result += level + ".";
+    }
+    result += name;
+    return result;
+  }
 };
 
 }  // namespace iceberg

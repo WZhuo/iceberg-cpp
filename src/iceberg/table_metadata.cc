@@ -34,6 +34,7 @@
 #include "iceberg/exception.h"
 #include "iceberg/file_io.h"
 #include "iceberg/json_internal.h"
+#include "iceberg/metrics_config.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/result.h"
 #include "iceberg/schema.h"
@@ -41,9 +42,11 @@
 #include "iceberg/sort_order.h"
 #include "iceberg/table_properties.h"
 #include "iceberg/table_update.h"
+#include "iceberg/util/error_collector.h"
 #include "iceberg/util/gzip_internal.h"
 #include "iceberg/util/location_util.h"
 #include "iceberg/util/macros.h"
+#include "iceberg/util/type_util.h"
 #include "iceberg/util/uuid.h"
 namespace iceberg {
 namespace {
@@ -61,6 +64,47 @@ std::string ToString(const SnapshotLogEntry& entry) {
 std::string ToString(const MetadataLogEntry& entry) {
   return std::format("MetadataLogEntry[timestampMillis={},file={}]", entry.timestamp_ms,
                      entry.metadata_file);
+}
+
+Result<std::unique_ptr<TableMetadata>> TableMetadata::Make(
+    const iceberg::Schema& schema, const iceberg::PartitionSpec& spec,
+    const iceberg::SortOrder& sort_order, const std::string& location,
+    const std::unordered_map<std::string, std::string>& properties, int format_version) {
+  for (const auto& [key, _] : properties) {
+    if (TableProperties::reserved_properties().contains(key)) {
+      return InvalidArgument(
+          "Table properties should not contain reserved properties, but got {}", key);
+    }
+  }
+
+  int last_column_id = 0;
+  auto next_id = [&last_column_id]() -> int32_t { return ++last_column_id; };
+
+  auto fresh_schema =
+      IdAssigner::AssignFreshIds(Schema::kInitialSchemaId, schema, next_id);
+
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto fresh_spec,
+      PartitionSpec::Make(
+          *fresh_schema, PartitionSpec::kInitialSpecId,
+          std::vector<PartitionField>(spec.fields().begin(), spec.fields().end()),
+          false));
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto fresh_order,
+      SortOrder::Make(sort_order.is_unsorted() ? sort_order.order_id()
+                                               : SortOrder::kInitialSortOrderId,
+                      std::vector<SortField>(sort_order.fields().begin(),
+                                             sort_order.fields().end())));
+  ICEBERG_RETURN_UNEXPECTED(
+      MetricsConfig::VerifyReferencedColumns(properties, *fresh_schema));
+
+  return TableMetadataBuilder::BuildFromEmpty(format_version)
+      ->SetCurrentSchema(fresh_schema, next_id())
+      .AddPartitionSpec(std::move(fresh_spec))
+      .AddSortOrder(std::move(fresh_order))
+      .SetLocation(location)
+      .SetProperties(properties)
+      .Build();
 }
 
 Result<std::shared_ptr<Schema>> TableMetadata::Schema() const {
@@ -437,6 +481,33 @@ struct TableMetadataBuilder::Impl {
     metadata.last_updated_ms = kInvalidLastUpdatedMs;
     metadata.metadata_file_location.clear();
   }
+
+  // TODO(zhuo.wang) Do validation
+  Status AddSchema(const std::shared_ptr<Schema>& schema, int new_last_column_id) {
+    if (new_last_column_id < metadata.last_column_id) {
+      return InvalidArgument("Invalid last column ID: {} < {} (previous last column ID)",
+                             new_last_column_id, metadata.last_column_id);
+    }
+    metadata.schemas.push_back(schema);
+    schemas_by_id.emplace(schema->schema_id().value(), schema);
+    metadata.current_schema_id = schema->schema_id().value();
+
+    return {};
+  }
+
+  // TODO(zhuo.wang) Do validation
+  Status AddPartitionSpec(const std::shared_ptr<PartitionSpec>& spec) {
+    metadata.partition_specs.push_back(spec);
+    specs_by_id.emplace(spec->spec_id(), spec);
+    return {};
+  }
+
+  // TODO(zhuo.wang) Do validation
+  Status AddSortOrder(const std::shared_ptr<SortOrder>& order) {
+    metadata.sort_orders.push_back(order);
+    sort_orders_by_id.emplace(order->order_id(), order);
+    return {};
+  }
 };
 
 TableMetadataBuilder::TableMetadataBuilder(int8_t format_version)
@@ -539,7 +610,7 @@ TableMetadataBuilder& TableMetadataBuilder::UpgradeFormatVersion(
 
 TableMetadataBuilder& TableMetadataBuilder::SetCurrentSchema(
     std::shared_ptr<Schema> schema, int32_t new_last_column_id) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  BUILDER_RETURN(impl_->AddSchema(schema, new_last_column_id));
 }
 
 TableMetadataBuilder& TableMetadataBuilder::SetCurrentSchema(int32_t schema_id) {
@@ -561,7 +632,7 @@ TableMetadataBuilder& TableMetadataBuilder::SetDefaultPartitionSpec(int32_t spec
 
 TableMetadataBuilder& TableMetadataBuilder::AddPartitionSpec(
     std::shared_ptr<PartitionSpec> spec) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  BUILDER_RETURN(impl_->AddPartitionSpec(spec));
 }
 
 TableMetadataBuilder& TableMetadataBuilder::RemovePartitionSpecs(
@@ -756,7 +827,8 @@ TableMetadataBuilder& TableMetadataBuilder::RemoveProperties(
 }
 
 TableMetadataBuilder& TableMetadataBuilder::SetLocation(std::string_view location) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  impl_->metadata.location = location;
+  return *this;
 }
 
 TableMetadataBuilder& TableMetadataBuilder::AddEncryptionKey(
