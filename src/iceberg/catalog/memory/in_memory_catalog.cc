@@ -23,6 +23,7 @@
 #include <iterator>  // IWYU pragma: keep
 #include <memory>
 
+#include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
 #include "iceberg/table_metadata.h"
@@ -404,7 +405,22 @@ Result<std::unique_ptr<Table>> InMemoryCatalog::CreateTable(
     const TableIdentifier& identifier, const Schema& schema, const PartitionSpec& spec,
     const std::string& location,
     const std::unordered_map<std::string, std::string>& properties) {
-  return NotImplemented("create table");
+  std::unique_lock lock(mutex_);
+  if (root_namespace_->TableExists(identifier).value_or(false)) {
+    return AlreadyExists("Table already exists: {}", identifier.name);
+  }
+
+  std::string base_location =
+      location.empty() ? warehouse_location_ + "/" + identifier.ToString() : location;
+
+  ICEBERG_ASSIGN_OR_RAISE(auto metadata,
+                          TableMetadata::Make(schema, spec, *SortOrder::Unsorted(),
+                                              base_location, properties));
+  ICEBERG_RETURN_UNEXPECTED(TableMetadataUtil::Write(*file_io_, nullptr, metadata.get()));
+  ICEBERG_RETURN_UNEXPECTED(root_namespace_->UpdateTableMetadataLocation(
+      identifier, metadata->metadata_file_location));
+  return std::make_unique<Table>(identifier, std::move(metadata), file_io_,
+                                 std::static_pointer_cast<Catalog>(shared_from_this()));
 }
 
 Result<std::unique_ptr<Table>> InMemoryCatalog::UpdateTable(

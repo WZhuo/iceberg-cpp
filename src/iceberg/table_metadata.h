@@ -132,6 +132,12 @@ struct ICEBERG_EXPORT TableMetadata {
   /// A `long` higher than all assigned row IDs
   int64_t next_row_id;
 
+  static Result<std::unique_ptr<TableMetadata>> Make(
+      const iceberg::Schema& schema, const iceberg::PartitionSpec& spec,
+      const iceberg::SortOrder& sort_order, const std::string& location,
+      const std::unordered_map<std::string, std::string>& properties,
+      int format_version = kDefaultTableFormatVersion);
+
   /// \brief Get the current schema, return NotFoundError if not found
   Result<std::shared_ptr<iceberg::Schema>> Schema() const;
   /// \brief Get the current schema by ID, return NotFoundError if not found

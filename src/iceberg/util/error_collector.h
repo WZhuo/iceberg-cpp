@@ -30,6 +30,12 @@
 
 namespace iceberg {
 
+#define BUILDER_RETURN(result)                                  \
+  if (auto&& result_name = result; !result_name) [[unlikely]] { \
+    errors_.emplace_back(std::move(result_name.error()));       \
+  }                                                             \
+  return *this;
+
 #define BUILDER_RETURN_IF_ERROR(result)                         \
   if (auto&& result_name = result; !result_name) [[unlikely]] { \
     errors_.emplace_back(std::move(result_name.error()));       \
