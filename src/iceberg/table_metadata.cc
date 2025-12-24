@@ -20,6 +20,7 @@
 #include "iceberg/table_metadata.h"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -36,6 +37,7 @@
 #include "iceberg/exception.h"
 #include "iceberg/file_io.h"
 #include "iceberg/json_internal.h"
+#include "iceberg/metrics_config.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/result.h"
 #include "iceberg/schema.h"
@@ -47,6 +49,7 @@
 #include "iceberg/util/gzip_internal.h"
 #include "iceberg/util/location_util.h"
 #include "iceberg/util/macros.h"
+#include "iceberg/util/type_util.h"
 #include "iceberg/util/uuid.h"
 namespace iceberg {
 namespace {
@@ -63,6 +66,106 @@ std::string ToString(const SnapshotLogEntry& entry) {
 std::string ToString(const MetadataLogEntry& entry) {
   return std::format("MetadataLogEntry[timestampMillis={},file={}]", entry.timestamp_ms,
                      entry.metadata_file);
+}
+
+Result<std::shared_ptr<PartitionSpec>> FreshPartitionSpec(int32_t spec_id,
+                                                          const Schema& fresh_schema,
+                                                          const Schema& base_schema,
+                                                          const PartitionSpec& spec) {
+  int32_t last_assigned_field_id = -1;
+  std::vector<PartitionField> partition_fields;
+  for (auto& field : spec.fields()) {
+    ICEBERG_ASSIGN_OR_RAISE(auto source_name,
+                            base_schema.FindColumnNameById(field.field_id()));
+    if (!source_name.has_value()) [[unlikely]] {
+      return InvalidSchema("Partition field id {} does not exist in the schema",
+                           field.field_id());
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto fresh_field,
+                            fresh_schema.FindFieldByName(source_name.value()));
+    if (!fresh_field.has_value()) [[unlikely]] {
+      return InvalidSchema("Partition field {} does not exist in the schema",
+                           source_name.value());
+    }
+    partition_fields.emplace_back(
+        fresh_field.value().get().field_id(), ++last_assigned_field_id,
+        std::string(fresh_field.value().get().name()), field.transform());
+  }
+  return PartitionSpec::Make(fresh_schema, spec_id, std::move(partition_fields), false,
+                             last_assigned_field_id);
+}
+
+Result<std::shared_ptr<SortOrder>> FreshSortOrder(int32_t order_id, const Schema& schema,
+                                                  const SortOrder& order) {
+  if (order.is_unsorted()) {
+    return SortOrder::Unsorted();
+  }
+
+  std::vector<SortField> fresh_fields;
+  for (const auto& field : order.fields()) {
+    ICEBERG_ASSIGN_OR_RAISE(auto source_name,
+                            schema.FindColumnNameById(field.source_id()));
+    if (!source_name.has_value()) {
+      return InvalidSchema("Unable to find source field with ID {} in the old schema",
+                           field.source_id());
+    }
+
+    ICEBERG_ASSIGN_OR_RAISE(auto fresh_field,
+                            schema.FindFieldByName(source_name.value()));
+    if (!fresh_field.has_value()) {
+      return InvalidSchema("Unable to find field '{}' in the new schema",
+                           source_name.value());
+    }
+
+    int32_t new_source_id = fresh_field.value().get().field_id();
+    fresh_fields.emplace_back(new_source_id, field.transform(), field.direction(),
+                              field.null_order());
+  }
+
+  return SortOrder::Make(order_id, std::move(fresh_fields));
+}
+
+Result<std::unique_ptr<TableMetadata>> TableMetadata::Make(
+    const iceberg::Schema& schema, const iceberg::PartitionSpec& spec,
+    const iceberg::SortOrder& sort_order, const std::string& location,
+    const std::unordered_map<std::string, std::string>& properties, int format_version) {
+  for (const auto& [key, _] : properties) {
+    if (TableProperties::reserved_properties().contains(key)) {
+      return InvalidArgument(
+          "Table properties should not contain reserved properties, but got {}", key);
+    }
+  }
+
+  // Reassign all column ids to ensure consistency
+  std::atomic<int32_t> last_column_id = 0;
+  auto next_id = [&last_column_id]() -> int32_t { return ++last_column_id; };
+  ICEBERG_ASSIGN_OR_RAISE(auto fresh_schema,
+                          AssignFreshIds(Schema::kInitialSchemaId, schema, next_id));
+
+  // rebuild the partition spec using the new column ids
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto fresh_spec,
+      FreshPartitionSpec(PartitionSpec::kInitialSpecId, *fresh_schema, schema, spec));
+
+  // rebuild the sort order using the new column ids
+  int32_t fresh_order_id =
+      sort_order.is_unsorted() ? sort_order.order_id() : SortOrder::kInitialSortOrderId;
+  ICEBERG_ASSIGN_OR_RAISE(auto fresh_order,
+                          FreshSortOrder(fresh_order_id, *fresh_schema, sort_order))
+
+  // Validata the metrics configuration.
+  ICEBERG_RETURN_UNEXPECTED(
+      MetricsConfig::VerifyReferencedColumns(properties, *fresh_schema));
+
+  // TODO(anyone) Validate commit properties
+
+  return TableMetadataBuilder::BuildFromEmpty(format_version)
+      ->SetLocation(location)
+      .AddSchema(std::move(fresh_schema))
+      .AddPartitionSpec(std::move(fresh_spec))
+      .AddSortOrder(std::move(fresh_order))
+      .SetProperties(properties)
+      .Build();
 }
 
 Result<std::shared_ptr<Schema>> TableMetadata::Schema() const {
@@ -404,6 +507,10 @@ class TableMetadataBuilder::Impl {
   const std::vector<std::unique_ptr<TableUpdate>>& changes() const { return changes_; }
   const TableMetadata* base() const { return base_; }
   const TableMetadata& metadata() const { return metadata_; }
+
+  void SetLocation(std::string_view location) {
+    metadata_.location = std::string(location);
+  }
 
   void SetMetadataLocation(std::string_view metadata_location) {
     metadata_location_ = std::string(metadata_location);
@@ -826,7 +933,8 @@ TableMetadataBuilder& TableMetadataBuilder::RemoveProperties(
 }
 
 TableMetadataBuilder& TableMetadataBuilder::SetLocation(std::string_view location) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  impl_->SetLocation(location);
+  return *this;
 }
 
 TableMetadataBuilder& TableMetadataBuilder::AddEncryptionKey(

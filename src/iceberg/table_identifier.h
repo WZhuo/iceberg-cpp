@@ -22,6 +22,8 @@
 /// \file iceberg/table_identifier.h
 /// A TableIdentifier is a unique identifier for a table
 
+#include <format>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,15 @@ struct ICEBERG_EXPORT Namespace {
   std::vector<std::string> levels;
 
   bool operator==(const Namespace& other) const { return levels == other.levels; }
+
+  std::string ToString() const {
+    std::ostringstream oss;
+    for (size_t i = 0; i < levels.size(); ++i) {
+      if (i) oss << '.';
+      oss << levels[i];
+    }
+    return oss.str();
+  }
 };
 
 /// \brief Identifies a table in iceberg catalog.
@@ -53,6 +64,27 @@ struct ICEBERG_EXPORT TableIdentifier {
     }
     return {};
   }
+
+  std::string ToString() const { return ns.ToString() + '.' + name; }
 };
 
 }  // namespace iceberg
+
+namespace std {
+
+template <>
+struct formatter<iceberg::Namespace> : std::formatter<std::string> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  auto format(const iceberg::Namespace& ns, format_context& ctx) const {
+    return std::formatter<std::string>::format(ns.ToString(), ctx);
+  }
+};
+
+template <>
+struct formatter<iceberg::TableIdentifier> : std::formatter<std::string> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  auto format(const iceberg::TableIdentifier& id, format_context& ctx) const {
+    return std::formatter<std::string>::format(id.ToString(), ctx);
+  }
+};
+}  // namespace std

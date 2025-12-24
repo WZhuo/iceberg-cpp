@@ -28,7 +28,9 @@
 #include <gtest/gtest.h>
 
 #include "iceberg/arrow/arrow_fs_file_io_internal.h"
+#include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
 #include "iceberg/table_metadata.h"
@@ -104,6 +106,19 @@ TEST_F(InMemoryCatalogTest, TableExists) {
   TableIdentifier tableIdent{.ns = {}, .name = "t1"};
   auto result = catalog_->TableExists(tableIdent);
   EXPECT_THAT(result, HasValue(::testing::Eq(false)));
+}
+
+TEST_F(InMemoryCatalogTest, CreateTable) {
+  TableIdentifier table_ident{.ns = {}, .name = "t1"};
+  auto schema = std::make_shared<Schema>(
+      std::vector<SchemaField>{SchemaField::MakeRequired(1, "x", int64())},
+      /*schema_id=*/1);
+  auto spec = PartitionSpec::Unpartitioned();
+
+  auto table = catalog_->CreateTable(table_ident, schema, spec, SortOrder::Unsorted(),
+                                     GenerateTestTableLocation(table_ident.name),
+                                     {{"property1", "value1"}});
+  EXPECT_THAT(table, IsOk());
 }
 
 TEST_F(InMemoryCatalogTest, RegisterTable) {
