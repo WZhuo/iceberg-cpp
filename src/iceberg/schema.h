@@ -68,6 +68,9 @@ class ICEBERG_EXPORT Schema : public StructType {
   /// evolution.
   std::optional<int32_t> schema_id() const;
 
+  /// \brief Get the highest field ID.
+  int32_t HighestFieldId() const;
+
   std::string ToString() const override;
 
   /// \brief Recursively find the SchemaField by field name.
@@ -157,6 +160,8 @@ class ICEBERG_EXPORT Schema : public StructType {
       const Schema&);
 
   const std::optional<int32_t> schema_id_;
+  /// Highest field ID.
+  const int32_t highest_field_id_;
   /// Field IDs that uniquely identify rows in the table.
   std::vector<int32_t> identifier_field_ids_;
   /// Mapping from field id to field.

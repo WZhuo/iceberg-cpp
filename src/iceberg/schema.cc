@@ -37,6 +37,12 @@ Schema::Schema(std::vector<SchemaField> fields, std::optional<int32_t> schema_id
                std::vector<int32_t> identifier_field_ids)
     : StructType(std::move(fields)),
       schema_id_(schema_id),
+      highest_field_id_(
+          fields.empty()
+              ? kInvalidColumnId
+              : std::ranges::max_element(
+                    fields_, {}, [](const auto& field) { return field.field_id(); })
+                    ->field_id()),
       identifier_field_ids_(std::move(identifier_field_ids)) {}
 
 Result<std::unique_ptr<Schema>> Schema::Make(
@@ -57,6 +63,8 @@ Result<std::unique_ptr<Schema>> Schema::Make(
 }
 
 std::optional<int32_t> Schema::schema_id() const { return schema_id_; }
+
+int32_t Schema::HighestFieldId() const { return highest_field_id_; }
 
 std::string Schema::ToString() const {
   std::string repr = "schema<";

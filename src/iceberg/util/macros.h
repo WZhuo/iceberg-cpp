@@ -53,6 +53,17 @@
     }                                      \
   } while (0)
 
+// Macro for validation checks.
+// `ValidationFailed` returned when the arguments are valid in isolation, but not in
+// conjunction with other arguments or state, as opposed to `InvalidArgument` which is
+// returned when an argument value is always invalid.
+#define ICEBERG_VALCHECK(expr, ...)         \
+  do {                                      \
+    if (!(expr)) [[unlikely]] {             \
+      return ValidationFailed(__VA_ARGS__); \
+    }                                       \
+  } while (0)
+
 // Macro for state checks, usually used for unexpected states
 #define ICEBERG_CHECK(expr, ...)   \
   do {                             \

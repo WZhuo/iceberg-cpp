@@ -191,6 +191,19 @@ TEST(TableMetadataBuilderTest, AssignUUID) {
   EXPECT_EQ(metadata->table_uuid, "TEST-UUID-ABCD");  // Original case preserved
 }
 
+TEST(TableMetadataBuilderTest, AddSchema) {
+  auto builder = TableMetadataBuilder::BuildFromEmpty(2);
+  builder->AddSchema(CreateTestSchema());
+  ICEBERG_UNWRAP_OR_FAIL(auto metadata, builder->Build());
+
+  // TODO(zhuo.wang) Check schema
+  // EXPECT_EQ(metadata->schemas.size(), 1);
+  EXPECT_EQ(Schema::kInitialSchemaId, metadata->schemas[0]->schema_id());
+
+  // Reuse of Schema
+  builder->AddSchema(CreateTestSchema());
+}
+
 TEST(TableMetadataBuilderTest, SetProperties) {
   auto builder = TableMetadataBuilder::BuildFromEmpty(2);
   builder->SetProperties({{"key1", "value1"}, {"key2", "value2"}});

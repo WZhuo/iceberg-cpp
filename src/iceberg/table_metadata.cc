@@ -404,6 +404,7 @@ class TableMetadataBuilder::Impl {
   const std::vector<std::unique_ptr<TableUpdate>>& changes() const { return changes_; }
   const TableMetadata* base() const { return base_; }
   const TableMetadata& metadata() const { return metadata_; }
+  int32_t last_column_id() const { return metadata_.last_column_id; }
 
   void SetMetadataLocation(std::string_view metadata_location) {
     metadata_location_ = std::string(metadata_location);
@@ -423,6 +424,9 @@ class TableMetadataBuilder::Impl {
 
   Status AssignUUID(std::string_view uuid);
   Status UpgradeFormatVersion(int8_t new_format_version);
+
+  Status SetCurrentSchema(int32_t schema_id);
+  Result<int32_t> AddSchema(std::shared_ptr<Schema> schema, int32_t new_last_column_id);
   Status SetDefaultSortOrder(int32_t order_id);
   Result<int32_t> AddSortOrder(const SortOrder& order);
   Status SetProperties(const std::unordered_map<std::string, std::string>& updated);
@@ -431,6 +435,8 @@ class TableMetadataBuilder::Impl {
   std::unique_ptr<TableMetadata> Build();
 
  private:
+  int32_t ReuseOrCreateNewSchemaId(const Schema& schema);
+
   /// \brief Internal method to check for existing sort order and reuse its ID or create a
   /// new one
   /// \param new_order The sort order to check
@@ -505,6 +511,112 @@ Status TableMetadataBuilder::Impl::UpgradeFormatVersion(int8_t new_format_versio
   changes_.push_back(std::make_unique<table::UpgradeFormatVersion>(new_format_version));
 
   return {};
+}
+
+Status TableMetadataBuilder::Impl::SetCurrentSchema(int32_t schema_id) {
+  if (schema_id == -1) {
+    ICEBERG_VALCHECK(last_added_schema_id_.has_value(),
+                     "Cannot set last added schema: no schema has been added");
+    return SetCurrentSchema(last_added_schema_id_.value());
+  }
+
+  if (metadata_.current_schema_id == schema_id) {
+    return {};
+  }
+
+  ICEBERG_PRECHECK(schemas_by_id_.contains(schema_id),
+                   "Cannot set current schema to unknown schema: {}", schema_id);
+
+  // Rebuild all the partition specs and sort orders for the new current schema
+  std::vector<std::shared_ptr<PartitionSpec>> new_specs;
+  for (auto& spec : metadata_.partition_specs) {
+    ICEBERG_ASSIGN_OR_RAISE(
+        auto new_spec,
+        PartitionSpec::Make(spec->spec_id(),
+                            spec->fields() | std::ranges::to<std::vector>(),
+                            std::nullopt));
+    new_specs.push_back(std::move(new_spec));
+  }
+  metadata_.partition_specs = std::move(new_specs);
+
+  specs_by_id_.clear();
+  for (const auto& spec : metadata_.partition_specs) {
+    specs_by_id_.emplace(spec->spec_id(), spec);
+  }
+
+  // Rebuild sort orders
+  std::vector<std::shared_ptr<SortOrder>> new_orders;
+  for (auto& order : metadata_.sort_orders) {
+    ICEBERG_ASSIGN_OR_RAISE(
+        auto new_order,
+        SortOrder::Make(order->order_id(),
+                        order->fields() | std::ranges::to<std::vector>()));
+    new_orders.push_back(std::move(new_order));
+  }
+  metadata_.sort_orders = std::move(new_orders);
+
+  sort_orders_by_id_.clear();
+  for (const auto& order : metadata_.sort_orders) {
+    sort_orders_by_id_.emplace(order->order_id(), order);
+  }
+
+  metadata_.current_schema_id = schema_id;
+
+  if (last_added_schema_id_.has_value() && last_added_schema_id_ == schema_id) {
+    changes_.push_back(std::make_unique<table::SetCurrentSchema>(kLastAdded));
+  } else {
+    changes_.push_back(std::make_unique<table::SetCurrentSchema>(schema_id));
+  }
+  return {};
+}
+
+Result<int32_t> TableMetadataBuilder::Impl::AddSchema(std::shared_ptr<Schema> schema,
+                                                      int32_t new_last_column_id) {
+  ICEBERG_PRECHECK(new_last_column_id >= metadata_.last_column_id,
+                   "Invalid last column ID: {} < {} (previous last column ID)",
+                   new_last_column_id, metadata_.last_column_id);
+
+  // TODO(zhuo.wang) Check schema compatible with its format version
+
+  int32_t new_schema_id = ReuseOrCreateNewSchemaId(*schema);
+  bool schema_found = schemas_by_id_.contains(new_schema_id);
+  if (schema_found && new_last_column_id == metadata_.last_column_id) {
+    // the new spec and last column id is already current and no change is needed
+    // update last_added_schema_id if the schema was added in this set of changes (since
+    // it is now the last)
+    bool is_new_schema =
+        last_added_schema_id_.has_value() &&
+        std::ranges::any_of(changes_, [new_schema_id](const auto& change) {
+          auto* add_schema = dynamic_cast<table::AddSchema*>(change.get());
+          return add_schema && add_schema->schema()->schema_id() == new_schema_id;
+        });
+    last_added_schema_id_ =
+        is_new_schema ? std::make_optional(new_schema_id) : std::nullopt;
+    return new_schema_id;
+  }
+
+  metadata_.last_column_id = new_last_column_id;
+
+  std::shared_ptr<Schema> new_schema;
+  if (new_schema_id != schema->schema_id()) {
+    ICEBERG_ASSIGN_OR_RAISE(auto identifier_field_names, schema->IdentifierFieldNames());
+    ICEBERG_ASSIGN_OR_RAISE(
+        new_schema, Schema::Make(schema->fields() | std::ranges::to<std::vector>(),
+                                 new_schema_id, identifier_field_names));
+  } else {
+    new_schema = schema;
+  }
+
+  if (!schema_found) {
+    metadata_.schemas.push_back(new_schema);
+    schemas_by_id_.emplace(new_schema_id, new_schema);
+  }
+
+  changes_.push_back(std::make_unique<table::AddSchema>(new_schema, new_last_column_id));
+
+  last_added_schema_id_ = new_schema_id;
+
+  return new_schema_id;
 }
 
 Status TableMetadataBuilder::Impl::SetDefaultSortOrder(int32_t order_id) {
@@ -635,6 +747,21 @@ std::unique_ptr<TableMetadata> TableMetadataBuilder::Impl::Build() {
   return std::make_unique<TableMetadata>(std::move(metadata_));
 }
 
+int32_t TableMetadataBuilder::Impl::ReuseOrCreateNewSchemaId(const Schema& schema) {
+  // if the schema already exists, use its id; otherwise use the highest id + 1
+  int32_t new_schema_id = metadata_.current_schema_id.value_or(Schema::kInitialSchemaId);
+  for (const auto& existing_schema : metadata_.schemas) {
+    // TODO(zhuo.wang) can not use '==', only compare fields and identifier fields, but
+    // not schema_id
+    if (*existing_schema == schema) {
+      return existing_schema->schema_id().value();
+    } else if (existing_schema->schema_id().value() >= new_schema_id) {
+      new_schema_id = existing_schema->schema_id().value() + 1;
+    }
+  }
+  return new_schema_id;
+}
+
 int32_t TableMetadataBuilder::Impl::ReuseOrCreateNewSortOrderId(
     const SortOrder& new_order) {
   if (new_order.is_unsorted()) {
@@ -709,15 +836,20 @@ TableMetadataBuilder& TableMetadataBuilder::UpgradeFormatVersion(
 
 TableMetadataBuilder& TableMetadataBuilder::SetCurrentSchema(
     std::shared_ptr<Schema> schema, int32_t new_last_column_id) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  ICEBERG_BUILDER_ASSIGN_OR_RETURN(auto schema_id,
+                                   impl_->AddSchema(schema, new_last_column_id));
+  return SetCurrentSchema(schema_id);
 }
 
 TableMetadataBuilder& TableMetadataBuilder::SetCurrentSchema(int32_t schema_id) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  ICEBERG_BUILDER_RETURN_IF_ERROR(impl_->SetCurrentSchema(schema_id));
+  return *this;
 }
 
 TableMetadataBuilder& TableMetadataBuilder::AddSchema(std::shared_ptr<Schema> schema) {
-  throw IcebergError(std::format("{} not implemented", __FUNCTION__));
+  std::ignore = impl_->AddSchema(
+      schema, std::max(impl_->last_column_id(), schema->HighestFieldId()));
+  return *this;
 }
 
 TableMetadataBuilder& TableMetadataBuilder::SetDefaultPartitionSpec(
