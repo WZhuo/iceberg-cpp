@@ -86,6 +86,14 @@ class ICEBERG_EXPORT TruncateUtils {
   /// - [Truncate Transform
   /// Details](https://iceberg.apache.org/spec/#truncate-transform-details)
   static Result<Literal> TruncateLiteral(const Literal& literal, int32_t width);
+
+  /// \brief Truncate a Literal to a specified width, and the return value is greater
+  /// than the input. It is used for upper bound truncation.
+  /// \param value The input Literal maximum value to truncate.
+  /// \param width The width to truncate to.
+  /// \return A Result containing the truncated Literal which is greater than the input or
+  /// an error if not exist.
+  static Result<Literal> TruncateLiteralMax(const Literal& value, int32_t width);
 };
 
 }  // namespace iceberg

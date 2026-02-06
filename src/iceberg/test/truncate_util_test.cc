@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include "iceberg/expression/literal.h"
+#include "iceberg/test/matchers.h"
 
 namespace iceberg {
 
@@ -48,6 +49,45 @@ TEST(TruncateUtilTest, TruncateLiteral) {
   EXPECT_EQ(TruncateUtils::TruncateLiteral(
                 Literal::Binary(std::vector<uint8_t>(data.begin(), data.end())), 3),
             Literal::Binary(std::vector<uint8_t>(expected.begin(), expected.end())));
+}
+
+TEST(TruncateUtilTest, TruncateLiteralMax) {
+  // String
+  EXPECT_EQ(TruncateUtils::TruncateLiteralMax(Literal::String("iceberg"), 3),
+            Literal::String("icf"));
+
+  // Binary
+  std::string data = "\x01\x02\x03\x04\x05";
+  std::string expected = "\x01\x02\x04";
+  EXPECT_EQ(TruncateUtils::TruncateLiteralMax(
+                Literal::Binary(std::vector<uint8_t>(data.begin(), data.end())), 3),
+            Literal::Binary(std::vector<uint8_t>(expected.begin(), expected.end())));
+
+  // String with all bytes 0xFF
+  EXPECT_THAT(
+      TruncateUtils::TruncateLiteralMax(Literal::String("\xFF\xFF\xFF"), 2),
+      ::testing::AllOf(
+          IsError(ErrorKind::kInvalidArgument),
+          HasErrorMessage("Cannot truncate upper bound for string: all bytes are 0xFF")));
+
+  // Binary with all bytes 0xFF
+  EXPECT_THAT(
+      TruncateUtils::TruncateLiteralMax(
+          Literal::Binary(std::vector<uint8_t>{0xFF, 0xFF, 0xFF}), 2),
+      ::testing::AllOf(
+          IsError(ErrorKind::kInvalidArgument),
+          HasErrorMessage("Cannot truncate upper bound for binary: all bytes are 0xFF")));
+
+  // Null value
+  EXPECT_EQ(
+      TruncateUtils::TruncateLiteralMax(Literal::Null(std::make_shared<StringType>()), 3),
+      Literal::Null(std::make_shared<StringType>()));
+
+  // Unsupported for other types
+  EXPECT_THAT(TruncateUtils::TruncateLiteralMax(Literal::Int(123), 10),
+              IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(TruncateUtils::TruncateLiteralMax(Literal::Decimal(1065, 4, 2), 50),
+              IsError(ErrorKind::kNotSupported));
 }
 
 }  // namespace iceberg

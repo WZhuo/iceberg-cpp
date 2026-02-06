@@ -33,6 +33,10 @@ template <TypeId type_id>
 Literal TruncateLiteralImpl(const Literal& literal, int32_t width) {
   std::unreachable();
 }
+template <TypeId type_id>
+Result<Literal> TruncateLiteralMaxImpl(const Literal& literal, int32_t width) {
+  std::unreachable();
+}
 
 template <>
 Literal TruncateLiteralImpl<TypeId::kInt>(const Literal& literal, int32_t width) {
@@ -72,6 +76,46 @@ Literal TruncateLiteralImpl<TypeId::kBinary>(const Literal& literal, int32_t wid
   return Literal::Binary(std::vector<uint8_t>(data.begin(), data.begin() + width));
 }
 
+template <>
+Result<Literal> TruncateLiteralMaxImpl<TypeId::kString>(const Literal& literal,
+                                                        int32_t width) {
+  const auto& str = std::get<std::string>(literal.value());
+  if (str.size() <= static_cast<size_t>(width)) {
+    return literal;
+  }
+
+  std::string truncated = TruncateUtils::TruncateUTF8(str, width);
+  for (auto it = truncated.rbegin(); it != truncated.rend(); ++it) {
+    auto byte = static_cast<uint8_t>(*it);
+    if (byte < 0xFF) {
+      *it = static_cast<char>(byte + 1);
+      // Remove any bytes after this one
+      truncated.resize(truncated.size() - std::distance(truncated.rbegin(), it));
+      return Literal::String(std::move(truncated));
+    }
+  }
+  return InvalidArgument("Cannot truncate upper bound for string: all bytes are 0xFF");
+}
+
+template <>
+Result<Literal> TruncateLiteralMaxImpl<TypeId::kBinary>(const Literal& literal,
+                                                        int32_t width) {
+  const auto& data = std::get<std::vector<uint8_t>>(literal.value());
+  if (static_cast<int32_t>(data.size()) <= width) {
+    return literal;
+  }
+
+  std::vector<uint8_t> truncated(data.begin(), data.begin() + width);
+  for (auto it = truncated.rbegin(); it != truncated.rend(); ++it) {
+    if (*it < 0xFF) {
+      ++(*it);
+      truncated.resize(truncated.size() - std::distance(truncated.rbegin(), it));
+      return Literal::Binary(std::move(truncated));
+    }
+  }
+  return InvalidArgument("Cannot truncate upper bound for binary: all bytes are 0xFF");
+}
+
 }  // namespace
 
 Decimal TruncateUtils::TruncateDecimal(const Decimal& decimal, int32_t width) {
@@ -100,6 +144,27 @@ Result<Literal> TruncateUtils::TruncateLiteral(const Literal& literal, int32_t w
     DISPATCH_TRUNCATE_LITERAL(TypeId::kBinary)
     default:
       return NotSupported("Truncate is not supported for type: {}",
+                          literal.type()->ToString());
+  }
+}
+
+Result<Literal> TruncateUtils::TruncateLiteralMax(const Literal& literal, int32_t width) {
+  if (literal.IsNull()) [[unlikely]] {
+    // Return null as is
+    return literal;
+  }
+
+  if (literal.IsAboveMax() || literal.IsBelowMin()) [[unlikely]] {
+    return NotSupported("Cannot truncate {}", literal.ToString());
+  }
+
+  switch (literal.type()->type_id()) {
+    case TypeId::kString:
+      return TruncateLiteralMaxImpl<TypeId::kString>(literal, width);
+    case TypeId::kBinary:
+      return TruncateLiteralMaxImpl<TypeId::kBinary>(literal, width);
+    default:
+      return NotSupported("Truncate max is not supported for type: {}",
                           literal.type()->ToString());
   }
 }
