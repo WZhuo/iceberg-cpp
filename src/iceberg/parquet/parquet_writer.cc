@@ -31,6 +31,7 @@
 
 #include "iceberg/arrow/arrow_fs_file_io_internal.h"
 #include "iceberg/arrow/arrow_status_internal.h"
+#include "iceberg/parquet/parquet_metrics.h"
 #include "iceberg/schema_internal.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/macros.h"
@@ -79,6 +80,8 @@ Result<std::optional<int32_t>> ParseCodecLevel(const WriterProperties& propertie
 class ParquetWriter::Impl {
  public:
   Status Open(const WriterOptions& options) {
+    schema_ = options.schema;
+
     ICEBERG_ASSIGN_OR_RAISE(auto compression, ParseCompression(options.properties));
     ICEBERG_ASSIGN_OR_RAISE(auto compression_level, ParseCodecLevel(options.properties));
 
@@ -91,15 +94,14 @@ class ParquetWriter::Impl {
     auto arrow_writer_properties = ::parquet::default_arrow_writer_properties();
 
     ArrowSchema c_schema;
-    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*options.schema, &c_schema));
+    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*schema_, &c_schema));
     ICEBERG_ARROW_ASSIGN_OR_RETURN(arrow_schema_, ::arrow::ImportSchema(&c_schema));
 
-    std::shared_ptr<::parquet::SchemaDescriptor> schema_descriptor;
     ICEBERG_ARROW_RETURN_NOT_OK(
         ::parquet::arrow::ToParquetSchema(arrow_schema_.get(), *writer_properties,
-                                          *arrow_writer_properties, &schema_descriptor));
+                                          *arrow_writer_properties, &parquet_schema_));
     auto schema_node = std::static_pointer_cast<::parquet::schema::GroupNode>(
-        schema_descriptor->schema_root());
+        parquet_schema_->schema_root());
 
     ICEBERG_ASSIGN_OR_RAISE(output_stream_, OpenOutputStream(options));
     auto file_writer = ::parquet::ParquetFileWriter::Open(
@@ -155,11 +157,25 @@ class ParquetWriter::Impl {
 
   std::vector<int64_t> split_offsets() const { return split_offsets_; }
 
+  Result<Metrics> metrics() {
+    if (!Closed()) {
+      return Invalid("ParquetWriter is not closed");
+    }
+    return ParquetMetrics::ComputeMetrics(*schema_, *parquet_schema_, *metrics_config_,
+                                          *writer_->metadata(), {});
+  }
+
  private:
   // TODO(gangwu): make memory pool configurable
   ::arrow::MemoryPool* pool_ = ::arrow::default_memory_pool();
+  // Schema to write from the Iceberg table.
+  std::shared_ptr<Schema> schema_;
   // Schema to write from the Parquet file.
   std::shared_ptr<::arrow::Schema> arrow_schema_;
+  // Parquet schema descriptor generated from the Arrow schema.
+  std::shared_ptr<::parquet::SchemaDescriptor> parquet_schema_;
+  // Metrics config for collecting metrics during write.
+  std::shared_ptr<MetricsConfig> metrics_config_;
   // The output stream to write Parquet file.
   std::shared_ptr<::arrow::io::OutputStream> output_stream_;
   // Parquet file writer to write ArrowArray.
@@ -181,12 +197,7 @@ Status ParquetWriter::Write(ArrowArray* array) { return impl_->Write(array); }
 
 Status ParquetWriter::Close() { return impl_->Close(); }
 
-Result<Metrics> ParquetWriter::metrics() {
-  if (!impl_->Closed()) {
-    return Invalid("ParquetWriter is not closed");
-  }
-  return {};
-}
+Result<Metrics> ParquetWriter::metrics() { return impl_->metrics(); }
 
 Result<int64_t> ParquetWriter::length() { return impl_->length(); }
 
