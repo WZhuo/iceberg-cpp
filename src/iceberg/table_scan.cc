@@ -168,6 +168,89 @@ Status TableScanContext::Validate() const {
   return {};
 }
 
+bool TableScanContext::IsScanCurrentLineage() const {
+  return !from_snapshot_id.has_value() && !to_snapshot_id.has_value();
+}
+
+Result<int64_t> TableScanContext::ToSnapshotIdInclusive(
+    const TableMetadata& metadata) const {
+  // Get the branch's current snapshot ID if branch is set
+  std::shared_ptr<Snapshot> branch_snapshot;
+  if (!branch.empty()) {
+    auto iter = metadata.refs.find(branch);
+    ICEBERG_CHECK(iter != metadata.refs.end() && iter->second != nullptr,
+                  "Cannot find branch: {}", branch);
+    ICEBERG_ASSIGN_OR_RAISE(branch_snapshot,
+                            metadata.SnapshotById(iter->second->snapshot_id));
+  }
+
+  if (to_snapshot_id.has_value()) {
+    int64_t to_snapshot_id_value = to_snapshot_id.value();
+
+    if (branch_snapshot != nullptr) {
+      // Validate `to_snapshot_id` is on the current branch
+      ICEBERG_ASSIGN_OR_RAISE(
+          bool is_ancestor,
+          SnapshotUtil::IsAncestorOf(metadata, branch_snapshot->snapshot_id,
+                                     to_snapshot_id_value));
+      ICEBERG_CHECK(is_ancestor,
+                    "End snapshot is not a valid snapshot on the current branch: {}",
+                    branch);
+    }
+
+    return to_snapshot_id_value;
+  }
+
+  // If to_snapshot_id is not set, use branch's current snapshot if branch is set
+  if (branch_snapshot != nullptr) {
+    return branch_snapshot->snapshot_id;
+  }
+
+  // Get current snapshot from table's current snapshot
+  std::shared_ptr<Snapshot> current_snapshot;
+  ICEBERG_ASSIGN_OR_RAISE(current_snapshot, metadata.Snapshot());
+  ICEBERG_CHECK(current_snapshot != nullptr,
+                "End snapshot is not set and table has no current snapshot");
+  return current_snapshot->snapshot_id;
+}
+
+Result<std::optional<int64_t>> TableScanContext::FromSnapshotIdExclusive(
+    const TableMetadata& metadata, int64_t to_snapshot_id_inclusive) const {
+  if (!from_snapshot_id.has_value()) {
+    return std::nullopt;
+  }
+
+  int64_t from_snapshot_id_value = from_snapshot_id.value();
+
+  // Validate `from_snapshot_id` is an ancestor of `to_snapshot_id_inclusive`
+  if (from_snapshot_id_inclusive) {
+    ICEBERG_ASSIGN_OR_RAISE(bool is_ancestor,
+                            SnapshotUtil::IsAncestorOf(metadata, to_snapshot_id_inclusive,
+                                                       from_snapshot_id_value));
+    ICEBERG_CHECK(
+        is_ancestor,
+        "Starting snapshot (inclusive) {} is not an ancestor of end snapshot {}",
+        from_snapshot_id_value, to_snapshot_id_inclusive);
+
+    // For inclusive behavior, return the parent snapshot ID (can be nullopt)
+    ICEBERG_ASSIGN_OR_RAISE(auto from_snapshot,
+                            metadata.SnapshotById(from_snapshot_id_value));
+    return from_snapshot->parent_snapshot_id;
+  }
+
+  // Validate there is an ancestor of `to_snapshot_id_inclusive` where parent is
+  // `from_snapshot_id`
+  ICEBERG_ASSIGN_OR_RAISE(bool is_parent_ancestor, SnapshotUtil::IsParentAncestorOf(
+                                                       metadata, to_snapshot_id_inclusive,
+                                                       from_snapshot_id_value));
+  ICEBERG_CHECK(
+      is_parent_ancestor,
+      "Starting snapshot (exclusive) {} is not a parent ancestor of end snapshot {}",
+      from_snapshot_id_value, to_snapshot_id_inclusive);
+
+  return from_snapshot_id_value;
+}
+
 }  // namespace internal
 
 ScanTask::~ScanTask() = default;
@@ -443,27 +526,56 @@ Result<std::vector<std::shared_ptr<FileScanTask>>> DataTableScan::PlanFiles() co
 // BaseIncrementalScanBuilder implementation
 
 BaseIncrementalScanBuilder& BaseIncrementalScanBuilder::FromSnapshot(
-    [[maybe_unused]] int64_t from_snapshot_id, [[maybe_unused]] bool inclusive) {
-  return AddError(NotImplemented("Incremental scan is not implemented"));
+    int64_t from_snapshot_id, bool inclusive) {
+  if (inclusive) {
+    // Inclusive: check snapshot exists
+    ICEBERG_BUILDER_CHECK(metadata_->SnapshotById(from_snapshot_id).has_value(),
+                          "Cannot find the starting snapshot: {}", from_snapshot_id);
+    context_.from_snapshot_id = from_snapshot_id;
+    context_.from_snapshot_id_inclusive = true;
+  } else {
+    // Exclusive: do not check existence (could be expired)
+    context_.from_snapshot_id = from_snapshot_id;
+    context_.from_snapshot_id_inclusive = false;
+  }
+  return *this;
 }
 
 BaseIncrementalScanBuilder& BaseIncrementalScanBuilder::FromSnapshot(
-    [[maybe_unused]] const std::string& ref, [[maybe_unused]] bool inclusive) {
-  return AddError(NotImplemented("Incremental scan is not implemented"));
+    const std::string& ref, bool inclusive) {
+  auto iter = metadata_->refs.find(ref);
+  ICEBERG_BUILDER_CHECK(iter != metadata_->refs.end() && iter->second != nullptr,
+                        "Cannot find ref: {}", ref);
+  ICEBERG_BUILDER_CHECK(iter->second->type() == SnapshotRefType::kTag,
+                        "Ref {} is not a tag", ref);
+  return FromSnapshot(iter->second->snapshot_id, inclusive);
 }
 
 BaseIncrementalScanBuilder& BaseIncrementalScanBuilder::ToSnapshot(
-    [[maybe_unused]] int64_t to_snapshot_id) {
-  return AddError(NotImplemented("Incremental scan is not implemented"));
+    int64_t to_snapshot_id) {
+  ICEBERG_BUILDER_CHECK(metadata_->SnapshotById(to_snapshot_id).has_value(),
+                        "Cannot find the end snapshot: {}", to_snapshot_id);
+  context_.to_snapshot_id = to_snapshot_id;
+  return *this;
 }
 
 BaseIncrementalScanBuilder& BaseIncrementalScanBuilder::ToSnapshot(
-    [[maybe_unused]] const std::string& ref) {
-  return AddError(NotImplemented("Incremental scan is not implemented"));
+    const std::string& ref) {
+  auto iter = metadata_->refs.find(ref);
+  ICEBERG_BUILDER_CHECK(iter != metadata_->refs.end() && iter->second != nullptr,
+                        "Cannot find ref: {}", ref);
+  ICEBERG_BUILDER_CHECK(iter->second->type() == SnapshotRefType::kTag,
+                        "Ref {} is not a tag", ref);
+  return ToSnapshot(iter->second->snapshot_id);
 }
 
 BaseIncrementalScanBuilder& BaseIncrementalScanBuilder::UseBranch(
     const std::string& branch) {
+  auto iter = metadata_->refs.find(branch);
+  ICEBERG_BUILDER_CHECK(iter != metadata_->refs.end() && iter->second != nullptr,
+                        "Cannot find ref: {}", branch);
+  ICEBERG_BUILDER_CHECK(iter->second->type() == SnapshotRefType::kBranch,
+                        "Ref {} is not a branch", branch);
   context_.branch = branch;
   return *this;
 }
@@ -480,7 +592,11 @@ IncrementalScanBuilder<ScanType>::Make(std::shared_ptr<TableMetadata> metadata,
 
 template <typename ScanType>
 Result<std::unique_ptr<ScanType>> IncrementalScanBuilder<ScanType>::Build() {
-  return NotImplemented("IncrementalAppendScanBuilder is not implemented");
+  ICEBERG_RETURN_UNEXPECTED(CheckErrors());
+  ICEBERG_RETURN_UNEXPECTED(context_.Validate());
+  ICEBERG_ASSIGN_OR_RAISE(auto schema, ResolveSnapshotSchema());
+
+  return ScanType::Make(metadata_, schema.get(), io_, context_);
 }
 
 template class IncrementalScanBuilder<IncrementalAppendScan>;
@@ -489,23 +605,97 @@ template class IncrementalScanBuilder<IncrementalChangelogScan>;
 template <typename ScanTaskType>
 Result<std::vector<std::shared_ptr<ScanTaskType>>>
 IncrementalScan<ScanTaskType>::PlanFiles() const {
-  return NotImplemented("Incremental scan is not implemented");
+  if (context_.IsScanCurrentLineage()) {
+    ICEBERG_ASSIGN_OR_RAISE(auto current_snapshot, metadata_->Snapshot());
+    if (current_snapshot == nullptr) {
+      return std::vector<std::shared_ptr<ScanTaskType>>{};
+    }
+  }
+
+  ICEBERG_ASSIGN_OR_RAISE(int64_t to_snapshot_id_inclusive,
+                          context_.ToSnapshotIdInclusive(*metadata_));
+  ICEBERG_ASSIGN_OR_RAISE(
+      std::optional<int64_t> from_snapshot_id_exclusive,
+      context_.FromSnapshotIdExclusive(*metadata_, to_snapshot_id_inclusive));
+
+  return PlanFiles(from_snapshot_id_exclusive, to_snapshot_id_inclusive);
 }
+
+template class IncrementalScan<FileScanTask>;
+template class IncrementalScan<ChangelogScanTask>;
 
 // IncrementalAppendScan implementation
 
 Result<std::unique_ptr<IncrementalAppendScan>> IncrementalAppendScan::Make(
-    [[maybe_unused]] std::shared_ptr<TableMetadata> metadata,
-    [[maybe_unused]] std::shared_ptr<Schema> schema,
-    [[maybe_unused]] std::shared_ptr<FileIO> io,
-    [[maybe_unused]] internal::TableScanContext context) {
-  return NotImplemented("IncrementalAppendScan is not implemented");
+    std::shared_ptr<TableMetadata> metadata, std::shared_ptr<Schema> schema,
+    std::shared_ptr<FileIO> io, internal::TableScanContext context) {
+  ICEBERG_PRECHECK(metadata != nullptr, "Table metadata cannot be null");
+  ICEBERG_PRECHECK(schema != nullptr, "Schema cannot be null");
+  ICEBERG_PRECHECK(io != nullptr, "FileIO cannot be null");
+  return std::unique_ptr<IncrementalAppendScan>(new IncrementalAppendScan(
+      std::move(metadata), std::move(schema), std::move(io), std::move(context)));
 }
 
 Result<std::vector<std::shared_ptr<FileScanTask>>> IncrementalAppendScan::PlanFiles(
     std::optional<int64_t> from_snapshot_id_exclusive,
     int64_t to_snapshot_id_inclusive) const {
-  return NotImplemented("IncrementalAppendScan::PlanFiles is not implemented");
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto ancestors_snapshots,
+      SnapshotUtil::AncestorsBetween(*metadata_, to_snapshot_id_inclusive,
+                                     from_snapshot_id_exclusive));
+
+  std::vector<std::shared_ptr<Snapshot>> append_snapshots;
+  std::ranges::copy_if(ancestors_snapshots, std::back_inserter(append_snapshots),
+                       [](const auto& snapshot) {
+                         return snapshot != nullptr &&
+                                snapshot->Operation().has_value() &&
+                                snapshot->Operation().value() == DataOperation::kAppend;
+                       });
+  if (append_snapshots.empty()) {
+    return std::vector<std::shared_ptr<FileScanTask>>{};
+  }
+
+  std::unordered_set<int64_t> snapshot_ids;
+  std::ranges::transform(append_snapshots,
+                         std::inserter(snapshot_ids, snapshot_ids.end()),
+                         [](const auto& snapshot) { return snapshot->snapshot_id; });
+
+  std::vector<ManifestFile> data_manifests;
+  for (const auto& snapshot : append_snapshots) {
+    SnapshotCache snapshot_cache(snapshot.get());
+    ICEBERG_ASSIGN_OR_RAISE(auto manifests, snapshot_cache.DataManifests(io_));
+    std::ranges::copy_if(manifests, std::back_inserter(data_manifests),
+                         [&snapshot_ids](const ManifestFile& manifest) {
+                           return snapshot_ids.contains(manifest.added_snapshot_id);
+                         });
+  }
+  if (data_manifests.empty()) {
+    return std::vector<std::shared_ptr<FileScanTask>>{};
+  }
+
+  TableMetadataCache metadata_cache(metadata_.get());
+  ICEBERG_ASSIGN_OR_RAISE(auto specs_by_id, metadata_cache.GetPartitionSpecsById());
+
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto manifest_group,
+      ManifestGroup::Make(io_, schema_, specs_by_id, std::move(data_manifests), {}));
+
+  manifest_group->CaseSensitive(context_.case_sensitive)
+      .Select(ScanColumns())
+      .FilterData(filter())
+      .FilterManifestEntries([&snapshot_ids](const ManifestEntry& entry) {
+        return entry.snapshot_id.has_value() &&
+               snapshot_ids.contains(entry.snapshot_id.value()) &&
+               entry.status == ManifestStatus::kAdded;
+      })
+      .IgnoreDeleted()
+      .ColumnsToKeepStats(context_.columns_to_keep_stats);
+
+  if (context_.ignore_residuals) {
+    manifest_group->IgnoreResiduals();
+  }
+
+  return manifest_group->PlanFiles();
 }
 
 // IncrementalChangelogScan implementation

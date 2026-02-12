@@ -132,6 +132,17 @@ struct TableScanContext {
 
   // Validate the context parameters to see if they have conflicts.
   [[nodiscard]] Status Validate() const;
+
+  /// \brief Returns true if this scan is a current lineage scan, which means it does not
+  /// specify from/to snapshot IDs.
+  bool IsScanCurrentLineage() const;
+
+  /// \brief Get the snapshot ID to scan up to (inclusive) based on the context.
+  Result<int64_t> ToSnapshotIdInclusive(const TableMetadata& metadata) const;
+
+  /// \brief Get the snapshot ID to scan from (exclusive) based on the context.
+  Result<std::optional<int64_t>> FromSnapshotIdExclusive(
+      const TableMetadata& metadata, int64_t to_snapshot_id_inclusive) const;
 };
 
 }  // namespace internal
@@ -387,6 +398,9 @@ class ICEBERG_EXPORT IncrementalAppendScan : public IncrementalScan<FileScanTask
 
   ~IncrementalAppendScan() override = default;
 
+  // Bring the public PlanFiles() from base class into scope
+  using IncrementalScan<FileScanTask>::PlanFiles;
+
  protected:
   Result<std::vector<std::shared_ptr<FileScanTask>>> PlanFiles(
       std::optional<int64_t> from_snapshot_id_exclusive,
@@ -405,6 +419,9 @@ class ICEBERG_EXPORT IncrementalChangelogScan
       std::shared_ptr<FileIO> io, internal::TableScanContext context);
 
   ~IncrementalChangelogScan() override = default;
+
+  // Bring the public PlanFiles() from base class into scope
+  using IncrementalScan<ChangelogScanTask>::PlanFiles;
 
  protected:
   Result<std::vector<std::shared_ptr<ChangelogScanTask>>> PlanFiles(
