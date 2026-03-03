@@ -116,6 +116,14 @@ Result<std::shared_ptr<MetricsConfig>> MetricsConfig::Make(const Table& table) {
                       *sort_order.value_or(SortOrder::Unsorted()));
 }
 
+Result<std::shared_ptr<MetricsConfig>> MetricsConfig::Make(
+    std::unordered_map<std::string, std::string> properties) {
+  // Create a minimal TableProperties wrapper for the properties
+  TableProperties props = TableProperties::FromMap(std::move(properties));
+
+  return MakeInternal(props, Schema({}), *SortOrder::Unsorted());
+}
+
 Result<std::shared_ptr<MetricsConfig>> MetricsConfig::MakeInternal(
     const TableProperties& props, const Schema& schema, const SortOrder& order) {
   ColumnModeMap column_modes;
