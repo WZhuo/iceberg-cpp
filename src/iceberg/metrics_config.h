@@ -63,6 +63,12 @@ class ICEBERG_EXPORT MetricsConfig {
   /// \brief Creates a metrics config from a table.
   static Result<std::shared_ptr<MetricsConfig>> Make(const Table& table);
 
+  /// \brief Creates a metrics config from properties (for testing)
+  /// \param properties Map of property key-value pairs
+  /// \return A shared pointer to the created MetricsConfig
+  static Result<std::shared_ptr<MetricsConfig>> Make(
+      std::unordered_map<std::string, std::string> properties);
+
   /// \brief Get `limit` num of primitive field ids from schema
   static Result<std::unordered_set<int32_t>> LimitFieldIds(const Schema& schema,
                                                            int32_t limit);
