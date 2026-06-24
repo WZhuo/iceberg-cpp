@@ -185,6 +185,9 @@ if(ICEBERG_BUILD_BUNDLE)
 
   add_iceberg_test(catalog_test USE_BUNDLE SOURCES in_memory_catalog_test.cc)
 
+  add_iceberg_test(metadata_table_scan_test USE_BUNDLE SOURCES
+                   metadata_table_scan_test.cc)
+
   add_iceberg_test(eval_expr_test
                    USE_BUNDLE
                    SOURCES

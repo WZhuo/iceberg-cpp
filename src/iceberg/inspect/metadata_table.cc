@@ -22,6 +22,7 @@
 #include <memory>
 #include <utility>
 
+#include "iceberg/file_reader.h"
 #include "iceberg/inspect/history_table.h"
 #include "iceberg/inspect/snapshots_table.h"
 
@@ -34,6 +35,10 @@ MetadataTable::MetadataTable(std::shared_ptr<Table> source_table,
       source_table_(std::move(source_table)) {}
 
 MetadataTable::~MetadataTable() = default;
+
+Result<std::unique_ptr<Reader>> MetadataTable::Scan() const {
+  return NotImplemented("Scan is not implemented for this metadata table");
+}
 
 Result<std::unique_ptr<MetadataTable>> MetadataTable::Make(std::shared_ptr<Table> table,
                                                            Kind kind) {

@@ -43,6 +43,14 @@ class ICEBERG_EXPORT MetadataTable {
 
   virtual Kind kind() const noexcept = 0;
 
+  /// \brief Create a reader that emits the metadata table's rows.
+  ///
+  /// The reader yields Arrow batches conforming to schema(). Metadata tables
+  /// read from in-memory table metadata, so no scan refinement (projection or
+  /// filtering) is supported yet. Subclasses that do not produce rows return
+  /// NotImplemented.
+  virtual Result<std::unique_ptr<Reader>> Scan() const;
+
   const TableIdentifier& name() const { return identifier_; }
 
   const std::shared_ptr<Schema>& schema() const { return schema_; }

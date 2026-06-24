@@ -37,6 +37,8 @@ class ICEBERG_EXPORT SnapshotsTable : public MetadataTable {
 
   Kind kind() const noexcept override { return Kind::kSnapshots; }
 
+  Result<std::unique_ptr<Reader>> Scan() const override;
+
  private:
   explicit SnapshotsTable(std::shared_ptr<Table> table);
 };

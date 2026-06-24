@@ -23,11 +23,17 @@
 #include <utility>
 #include <vector>
 
+#include "iceberg/file_reader.h"
+#include "iceberg/inspect/metadata_table_scan_internal.h"
+#include "iceberg/inspect/row_builder_internal.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/snapshot.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
 #include "iceberg/type.h"
+#include "iceberg/util/macros.h"
+#include "iceberg/util/timepoint.h"
 
 namespace iceberg {
 namespace {
@@ -63,6 +69,58 @@ Result<std::unique_ptr<SnapshotsTable>> SnapshotsTable::Make(
     return InvalidArgument("Table cannot be null");
   }
   return std::unique_ptr<SnapshotsTable>(new SnapshotsTable(std::move(table)));
+}
+
+Result<std::unique_ptr<Reader>> SnapshotsTable::Scan() const {
+  // Column order matches MakeSnapshotsTableSchema():
+  //   0: committed_at, 1: snapshot_id, 2: parent_id, 3: operation,
+  //   4: manifest_list, 5: summary
+  ICEBERG_ASSIGN_OR_RAISE(auto builder, ArrowRowBuilder::Make(*schema()));
+
+  const auto& snapshots = source_table()->snapshots();
+  for (const auto& snapshot : snapshots) {
+    // committed_at: timestamp stored in microseconds.
+    const int64_t committed_at_us = UnixMsFromTimePointMs(snapshot->timestamp_ms) * 1000;
+    ICEBERG_RETURN_UNEXPECTED(AppendInt(builder.column(0), committed_at_us));
+
+    // snapshot_id
+    ICEBERG_RETURN_UNEXPECTED(AppendInt(builder.column(1), snapshot->snapshot_id));
+
+    // parent_id (optional)
+    if (snapshot->parent_snapshot_id.has_value()) {
+      ICEBERG_RETURN_UNEXPECTED(
+          AppendInt(builder.column(2), snapshot->parent_snapshot_id.value()));
+    } else {
+      ICEBERG_RETURN_UNEXPECTED(AppendNull(builder.column(2)));
+    }
+
+    // operation (optional)
+    if (auto operation = snapshot->Operation(); operation.has_value()) {
+      ICEBERG_RETURN_UNEXPECTED(AppendString(builder.column(3), operation.value()));
+    } else {
+      ICEBERG_RETURN_UNEXPECTED(AppendNull(builder.column(3)));
+    }
+
+    // manifest_list (optional)
+    if (snapshot->manifest_list.empty()) {
+      ICEBERG_RETURN_UNEXPECTED(AppendNull(builder.column(4)));
+    } else {
+      ICEBERG_RETURN_UNEXPECTED(AppendString(builder.column(4), snapshot->manifest_list));
+    }
+
+    // summary (map<string, string>)
+    ICEBERG_RETURN_UNEXPECTED(AppendStringMap(builder.column(5), snapshot->summary));
+
+    ICEBERG_RETURN_UNEXPECTED(builder.FinishRow());
+  }
+
+  std::vector<ArrowArray> batches;
+  if (!snapshots.empty()) {
+    ICEBERG_ASSIGN_OR_RAISE(auto batch, std::move(builder).Finish());
+    batches.push_back(batch);
+  }
+
+  return std::make_unique<InMemoryBatchReader>(schema(), std::move(batches));
 }
 
 }  // namespace iceberg
