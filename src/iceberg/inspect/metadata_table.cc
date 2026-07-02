@@ -35,6 +35,13 @@ MetadataTable::MetadataTable(std::shared_ptr<Table> source_table,
 
 MetadataTable::~MetadataTable() = default;
 
+bool MetadataTable::supports_time_travel() const noexcept { return false; }
+
+Result<ArrowArray> MetadataTable::Scan(
+    std::optional<SnapshotSelection> /* snapshot_selection */) {
+  return NotSupported("Scan is not supported for this metadata table type");
+}
+
 Result<std::unique_ptr<MetadataTable>> MetadataTable::Make(std::shared_ptr<Table> table,
                                                            Kind kind) {
   if (table == nullptr) [[unlikely]] {
@@ -46,9 +53,24 @@ Result<std::unique_ptr<MetadataTable>> MetadataTable::Make(std::shared_ptr<Table
       return SnapshotsTable::Make(table);
     case Kind::kHistory:
       return HistoryTable::Make(table);
+    case Kind::kEntries:
+    case Kind::kFiles:
+    case Kind::kDataFiles:
+    case Kind::kDeleteFiles:
+    case Kind::kMetadataLogEntries:
+    case Kind::kRefs:
+    case Kind::kManifests:
+    case Kind::kPartitions:
+    case Kind::kAllDataFiles:
+    case Kind::kAllDeleteFiles:
+    case Kind::kAllFiles:
+    case Kind::kAllManifests:
+    case Kind::kAllEntries:
+    case Kind::kPositionDeletes:
+      return NotSupported("Metadata table type not yet implemented");
   }
 
-  return NotSupported("Unsupported metadata table type");
+  return NotSupported("Unknown metadata table type");
 }
 
 }  // namespace iceberg

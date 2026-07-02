@@ -19,6 +19,8 @@
 
 #include "iceberg/inspect/metadata_table.h"
 
+#include <vector>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -115,6 +117,63 @@ TEST_F(MetadataTableTest, FactoryRejectsNullSourceTable) {
   auto result = MetadataTable::Make(nullptr, MetadataTable::Kind::kSnapshots);
   EXPECT_THAT(result, IsError(ErrorKind::kInvalidArgument));
   EXPECT_THAT(result, HasErrorMessage("Table cannot be null"));
+}
+
+TEST_F(MetadataTableTest, AllKindEnumValues) {
+  // Verify all 16 Kind enum values are present and distinct.
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kEntries), 0);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kFiles), 1);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kDataFiles), 2);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kDeleteFiles), 3);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kHistory), 4);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kMetadataLogEntries), 5);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kSnapshots), 6);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kRefs), 7);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kManifests), 8);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kPartitions), 9);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kAllDataFiles), 10);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kAllDeleteFiles), 11);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kAllFiles), 12);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kAllManifests), 13);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kAllEntries), 14);
+  EXPECT_EQ(static_cast<int>(MetadataTable::Kind::kPositionDeletes), 15);
+}
+
+TEST_F(MetadataTableTest, UnimplementedKindsReturnNotSupported) {
+  // All new (not-yet-implemented) kinds should return NotSupported from the factory.
+  std::vector<MetadataTable::Kind> unimplemented = {
+      MetadataTable::Kind::kEntries,
+      MetadataTable::Kind::kFiles,
+      MetadataTable::Kind::kDataFiles,
+      MetadataTable::Kind::kDeleteFiles,
+      MetadataTable::Kind::kMetadataLogEntries,
+      MetadataTable::Kind::kRefs,
+      MetadataTable::Kind::kManifests,
+      MetadataTable::Kind::kPartitions,
+      MetadataTable::Kind::kAllDataFiles,
+      MetadataTable::Kind::kAllDeleteFiles,
+      MetadataTable::Kind::kAllFiles,
+      MetadataTable::Kind::kAllManifests,
+      MetadataTable::Kind::kAllEntries,
+      MetadataTable::Kind::kPositionDeletes,
+  };
+
+  for (auto kind : unimplemented) {
+    auto result = MetadataTable::Make(source_table_, kind);
+    EXPECT_THAT(result, IsError(ErrorKind::kNotSupported))
+        << "Kind " << static_cast<int>(kind) << " should return NotSupported";
+  }
+}
+
+TEST_F(MetadataTableTest, DefaultSupportsTimeTravelReturnsFalse) {
+  // The base class default implementation should return false.
+  EXPECT_FALSE(snapshots_table_->supports_time_travel());
+}
+
+TEST_F(MetadataTableTest, DefaultScanReturnsNotSupported) {
+  // The base class default Scan() should return NotSupported.
+  auto result = snapshots_table_->Scan(std::nullopt);
+  EXPECT_THAT(result, IsError(ErrorKind::kNotSupported));
 }
 
 }  // namespace iceberg

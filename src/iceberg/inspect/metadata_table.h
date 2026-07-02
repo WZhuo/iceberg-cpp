@@ -20,20 +20,48 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
 
+#include "iceberg/arrow_c_data.h"
 #include "iceberg/iceberg_export.h"
 #include "iceberg/result.h"
 #include "iceberg/table_identifier.h"
 #include "iceberg/type_fwd.h"
+#include "iceberg/util/timepoint.h"
 
 namespace iceberg {
+
+/// \brief Parameters for snapshot selection (time travel).
+struct SnapshotSelection {
+  /// \brief The snapshot ID to read.
+  std::optional<int64_t> snapshot_id;
+  /// \brief Read the snapshot that was current at this timestamp.
+  std::optional<TimePointMs> as_of_timestamp;
+  /// \brief Read the snapshot referenced by this named ref (branch or tag).
+  std::optional<std::string> ref_name;
+};
 
 /// \brief Base class for Iceberg metadata tables.
 class ICEBERG_EXPORT MetadataTable {
  public:
   enum class Kind {
-    kSnapshots,
+    kEntries,
+    kFiles,
+    kDataFiles,
+    kDeleteFiles,
     kHistory,
+    kMetadataLogEntries,
+    kSnapshots,
+    kRefs,
+    kManifests,
+    kPartitions,
+    kAllDataFiles,
+    kAllDeleteFiles,
+    kAllFiles,
+    kAllManifests,
+    kAllEntries,
+    kPositionDeletes,
   };
 
   static Result<std::unique_ptr<MetadataTable>> Make(std::shared_ptr<Table> table,
@@ -42,6 +70,24 @@ class ICEBERG_EXPORT MetadataTable {
   virtual ~MetadataTable();
 
   virtual Kind kind() const noexcept = 0;
+
+  /// \brief Whether this metadata table supports time-travel queries.
+  ///
+  /// The default implementation returns false. Subclasses that support
+  /// reading historical snapshots should override to return true.
+  virtual bool supports_time_travel() const noexcept;
+
+  /// \brief Scan the metadata table and return all rows as an Arrow struct array.
+  ///
+  /// The returned ArrowArray is a struct array where each element is one row.
+  /// The caller takes ownership and must call ArrowArrayRelease when done.
+  ///
+  /// \param snapshot_selection optional snapshot selection for time travel.
+  ///        Pass std::nullopt to use the current snapshot.
+  ///
+  /// The default implementation returns NotSupported. Subclasses override this
+  /// to materialize their data.
+  virtual Result<ArrowArray> Scan(std::optional<SnapshotSelection> snapshot_selection);
 
   const TableIdentifier& name() const { return identifier_; }
 
