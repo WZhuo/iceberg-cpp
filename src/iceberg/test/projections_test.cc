@@ -20,6 +20,7 @@
 #include "iceberg/expression/projections.h"
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -985,6 +986,51 @@ TEST_F(TruncateProjectionTest, LongInclusive) {
   AssertProjectionInclusive(*spec, *schema, bound_less_than,
                             Expression::Operation::kLtEq);
   AssertProjectionInclusive(*spec, *schema, bound_equal, Expression::Operation::kEq);
+}
+
+TEST_F(TruncateProjectionTest, IntegerBoundaryLiteralInclusive) {
+  auto schema = std::make_shared<Schema>(
+      std::vector<SchemaField>{SchemaField::MakeOptional(1, "value", int32())}, 0);
+  auto truncate_transform = Transform::Truncate(10);
+  PartitionField pt_field(1, 1000, "value_trunc", truncate_transform);
+  ICEBERG_UNWRAP_OR_FAIL(auto spec, PartitionSpec::Make(0, {pt_field}));
+
+  // `value > INT32_MAX` / `value < INT32_MIN` match no rows; adjusting the
+  // literal for projection used to overflow the signed domain. The projection
+  // now safely declines, and inclusive projections degrade to always-true.
+  auto greater_than_max = Expressions::GreaterThan(
+      "value", Literal::Int(std::numeric_limits<int32_t>::max()));
+  ICEBERG_UNWRAP_OR_FAIL(auto bound_gt_max, greater_than_max->Bind(*schema, true));
+
+  auto less_than_min =
+      Expressions::LessThan("value", Literal::Int(std::numeric_limits<int32_t>::min()));
+  ICEBERG_UNWRAP_OR_FAIL(auto bound_lt_min, less_than_min->Bind(*schema, true));
+
+  AssertProjectionInclusive(*spec, *schema, bound_gt_max, Expression::Operation::kTrue);
+  AssertProjectionInclusive(*spec, *schema, bound_lt_min, Expression::Operation::kTrue);
+}
+
+TEST_F(TruncateProjectionTest, LongBoundaryLiteralStrict) {
+  auto schema = std::make_shared<Schema>(
+      std::vector<SchemaField>{SchemaField::MakeOptional(1, "value", int64())}, 0);
+  auto truncate_transform = Transform::Truncate(10);
+  PartitionField pt_field(1, 1000, "value_trunc", truncate_transform);
+  ICEBERG_UNWRAP_OR_FAIL(auto spec, PartitionSpec::Make(0, {pt_field}));
+
+  // `value <= INT64_MAX` / `value >= INT64_MIN` match every row; adjusting the
+  // literal for the strict projection used to overflow the signed domain. The
+  // projection now safely declines, and strict projections degrade to
+  // always-false (no strict guarantee).
+  auto lt_eq_max = Expressions::LessThanOrEqual(
+      "value", Literal::Long(std::numeric_limits<int64_t>::max()));
+  ICEBERG_UNWRAP_OR_FAIL(auto bound_lt_eq_max, lt_eq_max->Bind(*schema, true));
+
+  auto gt_eq_min = Expressions::GreaterThanOrEqual(
+      "value", Literal::Long(std::numeric_limits<int64_t>::min()));
+  ICEBERG_UNWRAP_OR_FAIL(auto bound_gt_eq_min, gt_eq_min->Bind(*schema, true));
+
+  AssertProjectionStrict(*spec, *schema, bound_lt_eq_max, Expression::Operation::kFalse);
+  AssertProjectionStrict(*spec, *schema, bound_gt_eq_min, Expression::Operation::kFalse);
 }
 
 TEST_F(TruncateProjectionTest, StringStrict) {

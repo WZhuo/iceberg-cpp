@@ -20,6 +20,7 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <ranges>
 #include <string>
@@ -42,6 +43,34 @@ namespace iceberg {
 
 class ProjectionUtil {
  private:
+  // Returns true when adjusting the literal by +1/-1 would overflow its value
+  // domain, i.e. the literal holds the exact minimum or maximum of its physical
+  // type. Such comparison predicates are trivially true or false (no value lies
+  // beyond the boundary), so callers decline to project them (returning nullptr,
+  // the conservative "cannot project" answer) instead of performing arithmetic
+  // that overflows the signed domain (undefined behavior).
+  static bool AdjustmentOverflows(const Literal& literal, int adjustment) {
+    switch (literal.type()->type_id()) {
+      case TypeId::kInt:
+      case TypeId::kDate: {
+        const auto value = std::get<int32_t>(literal.value());
+        return adjustment > 0 ? value == std::numeric_limits<int32_t>::max()
+                              : value == std::numeric_limits<int32_t>::min();
+      }
+      case TypeId::kLong:
+      case TypeId::kTimestamp:
+      case TypeId::kTimestampTz:
+      case TypeId::kTimestampNs:
+      case TypeId::kTimestampTzNs: {
+        const auto value = std::get<int64_t>(literal.value());
+        return adjustment > 0 ? value == std::numeric_limits<int64_t>::max()
+                              : value == std::numeric_limits<int64_t>::min();
+      }
+      default:
+        return false;
+    }
+  }
+
   static Result<Literal> AdjustLiteral(const Literal& literal, int adjustment) {
     switch (literal.type()->type_id()) {
       case TypeId::kInt:
@@ -157,11 +186,21 @@ class ProjectionUtil {
 
     switch (pred->op()) {
       case Expression::Operation::kLt: {
+        // `col < type-min` matches no rows; adjusting the literal would
+        // overflow, so decline to project instead.
+        if (AdjustmentOverflows(pred->literal(), /*adjustment=*/-1)) {
+          return nullptr;
+        }
         // adjust closed and then transform ltEq
         ICEBERG_ASSIGN_OR_RAISE(auto adjusted, MinusOne(pred->literal()));
         return MakePredicate(Expression::Operation::kLtEq, name, func, adjusted);
       }
       case Expression::Operation::kGt: {
+        // `col > type-max` matches no rows; adjusting the literal would
+        // overflow, so decline to project instead.
+        if (AdjustmentOverflows(pred->literal(), /*adjustment=*/+1)) {
+          return nullptr;
+        }
         // adjust closed and then transform gtEq
         ICEBERG_ASSIGN_OR_RAISE(auto adjusted, PlusOne(pred->literal()));
         return MakePredicate(Expression::Operation::kGtEq, name, func, adjusted);
@@ -195,10 +234,20 @@ class ProjectionUtil {
 
     switch (pred->op()) {
       case Expression::Operation::kLtEq: {
+        // `col <= type-max` matches every row; adjusting the literal would
+        // overflow, so decline to project (no strict guarantee) instead.
+        if (AdjustmentOverflows(pred->literal(), /*adjustment=*/+1)) {
+          return nullptr;
+        }
         ICEBERG_ASSIGN_OR_RAISE(auto adjusted, PlusOne(pred->literal()));
         return MakePredicate(Expression::Operation::kLt, name, func, adjusted);
       }
       case Expression::Operation::kGtEq: {
+        // `col >= type-min` matches every row; adjusting the literal would
+        // overflow, so decline to project (no strict guarantee) instead.
+        if (AdjustmentOverflows(pred->literal(), /*adjustment=*/-1)) {
+          return nullptr;
+        }
         ICEBERG_ASSIGN_OR_RAISE(auto adjusted, MinusOne(pred->literal()));
         return MakePredicate(Expression::Operation::kGt, name, func, adjusted);
       }
