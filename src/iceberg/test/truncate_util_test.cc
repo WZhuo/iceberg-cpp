@@ -19,6 +19,8 @@
 
 #include "iceberg/util/truncate_util.h"
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 #include "iceberg/expression/literal.h"
@@ -49,6 +51,31 @@ TEST(TruncateUtilTest, TruncateLiteral) {
   EXPECT_EQ(TruncateUtils::TruncateLiteral(
                 Literal::Binary(std::vector<uint8_t>(data.begin(), data.end())), 3),
             Literal::Binary(std::vector<uint8_t>(expected.begin(), expected.end())));
+}
+
+TEST(TruncateUtilTest, TruncateLiteralExtremeValuesNoOverflow) {
+  // Type-minimum values used to make the final subtraction in TruncateInteger
+  // overflow (signed-overflow UB); the expected values mirror the Java
+  // reference implementation's defined wraparound arithmetic.
+  EXPECT_EQ(TruncateUtils::TruncateLiteral(
+                Literal::Int(std::numeric_limits<int32_t>::min()), 10),
+            Literal::Int(2147483646));
+  EXPECT_EQ(TruncateUtils::TruncateLiteral(
+                Literal::Long(std::numeric_limits<int64_t>::min()), 10),
+            Literal::Long(9223372036854775806LL));
+
+  // Type-maximum values stay in range and truncate normally.
+  EXPECT_EQ(TruncateUtils::TruncateLiteral(
+                Literal::Int(std::numeric_limits<int32_t>::max()), 10),
+            Literal::Int(2147483640));
+  EXPECT_EQ(TruncateUtils::TruncateLiteral(
+                Literal::Long(std::numeric_limits<int64_t>::max()), 10),
+            Literal::Long(9223372036854775800LL));
+
+  // A width close to INT32_MAX used to overflow the (v % W) + W step in the
+  // int32 arm; the expected value matches Java's wraparound result.
+  EXPECT_EQ(TruncateUtils::TruncateLiteral(Literal::Int(2147483645), 2147483646),
+            Literal::Int(-2147483646));
 }
 
 TEST(TruncateUtilTest, TruncateLiteralRejectsInvalidWidth) {

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "iceberg/iceberg_export.h"
@@ -84,10 +85,26 @@ class ICEBERG_EXPORT TruncateUtils {
   ///
   /// The remainder, v % W, must be positive. For languages where % can produce negative
   /// values, the correct truncate function is: v - (((v % W) + W) % W)
+  ///
+  /// The overflow-prone steps of that expression are evaluated in the unsigned
+  /// counterpart of T: for extreme inputs (v at the type minimum with a non-zero
+  /// remainder to subtract, or a width close to INT32_MAX making (v % W) + W exceed
+  /// INT32_MAX in the int32 arm) the arithmetic wraps with defined two's-complement
+  /// semantics instead of triggering signed-overflow UB. This keeps the function total
+  /// over every value T admits and every width ValidateTruncateWidth admits, and keeps
+  /// the results bit-identical to the Java reference implementation, whose int
+  /// arithmetic is defined wraparound.
   template <typename T>
     requires std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t>
   static inline T TruncateInteger(T v, int32_t W) {
-    return v - (((v % W) + W) % W);
+    using U = std::make_unsigned_t<T>;
+    const T w = static_cast<T>(W);
+    // v % w is well-defined for w > 0; the following add may overflow, so it is
+    // performed in U and converted back (two's-complement, defined since C++20).
+    const T shifted = static_cast<T>(static_cast<U>(v % w) + static_cast<U>(w));
+    const T r = shifted % w;
+    // v - r may overflow when v is the type minimum; wrap the subtraction in U.
+    return static_cast<T>(static_cast<U>(v) - static_cast<U>(r));
   }
 
   /// \brief Truncate a Decimal to a specified width.
